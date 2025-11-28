@@ -1,0 +1,46 @@
+{
+  "prices": {
+    "amzn": {
+      "price": 197.513004,
+      "source": "Polygon API",
+      "timestamp": "2025-11-28T18:58:10.073131"
+    },
+    "nvda": {
+      "price": 155.366094,
+      "source": "Polygon API",
+      "timestamp": "2025-11-28T18:58:10.189601"
+    },
+    "msft": {
+      "price": 418.45245,
+      "source": "Polygon API",
+      "timestamp": "2025-11-28T18:58:10.308816"
+    },
+    "vuaa": {
+      "price": 538.644405,
+      "source": "Polygon API",
+      "timestamp": "2025-11-28T18:58:49.162569"
+    },
+    "btc": {
+      "price": 78763.2,
+      "source": "Polygon API",
+      "timestamp": "2025-11-28T18:58:49.273275"
+    },
+    "govt_bonds": {
+      "price": 100.0,
+      "source": "manual (unit_current_price)",
+      "timestamp": "2025-11-28T18:58:49.273986"
+    },
+    "savings_account": {
+      "price": 60000.0,
+      "source": "manual (unit_current_price)",
+      "timestamp": "2025-11-28T18:58:49.274318"
+    }
+  },
+  "exchange_rates": {
+    "USD_EUR": {
+      "rate": 0.8619,
+      "timestamp": "2025-11-28T18:58:10.072756"
+    }
+  },
+  "saved_at": "2025-11-28T18:58:49.274322"
+}

@@ -4,6 +4,7 @@ import json
 import os
 import re
 import requests
+from datetime import datetime, timedelta
 from functools import lru_cache
 from polygon import RESTClient
 from dotenv import load_dotenv
@@ -18,6 +19,15 @@ BRAVE_API_KEY = os.getenv("BRAVE_SEARCH_API_KEY")
 
 # Portfolio file path (in project root)
 PORTFOLIO_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "portfolio.json")
+
+# =============================================================================
+# PRICE CACHE CONFIGURATION
+# =============================================================================
+# Cache TTL (Time-To-Live) - prices valid for this duration
+CACHE_TTL_MINUTES = 15
+
+# Disk cache file path (in project root)
+PRICE_CACHE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".price_cache.json")
 
 
 def load_portfolio(path: str = PORTFOLIO_FILE) -> dict:
@@ -37,36 +47,137 @@ def load_portfolio(path: str = PORTFOLIO_FILE) -> dict:
 PORTFOLIO = load_portfolio()
 TRADING_FEE = PORTFOLIO.get("trading_fee", 0.002)
 
-# Session-level price cache (persists until explicitly cleared)
-# This prevents rate limiting issues with Polygon and Brave Search APIs
-_PRICE_CACHE = {}  # {asset_id: price}
-_PRICE_SOURCE_CACHE = {}  # {asset_id: (price, source)}
-_EXCHANGE_RATE_CACHE = {}  # {pair: rate}
+# =============================================================================
+# TTL-BASED PRICE CACHE WITH DISK PERSISTENCE
+# =============================================================================
+# Cache structure: {asset_id: {"price": float, "source": str, "timestamp": str}}
+_PRICE_CACHE = {}
+_EXCHANGE_RATE_CACHE = {}  # {pair: {"rate": float, "timestamp": str}}
+
+
+def _load_disk_cache() -> dict:
+    """Load price cache from disk file."""
+    if os.path.exists(PRICE_CACHE_FILE):
+        try:
+            with open(PRICE_CACHE_FILE, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Warning: Could not load price cache: {e}")
+    return {}
+
+
+def _save_disk_cache():
+    """Save price cache to disk file."""
+    try:
+        cache_data = {
+            "prices": _PRICE_CACHE,
+            "exchange_rates": _EXCHANGE_RATE_CACHE,
+            "saved_at": datetime.now().isoformat()
+        }
+        with open(PRICE_CACHE_FILE, "w") as f:
+            json.dump(cache_data, f, indent=2)
+    except IOError as e:
+        print(f"Warning: Could not save price cache: {e}")
+
+
+def _is_cache_valid(timestamp_str: str, ttl_minutes: int = CACHE_TTL_MINUTES) -> bool:
+    """Check if a cached value is still valid based on TTL."""
+    if not timestamp_str:
+        return False
+    try:
+        cached_time = datetime.fromisoformat(timestamp_str)
+        return datetime.now() - cached_time < timedelta(minutes=ttl_minutes)
+    except (ValueError, TypeError):
+        return False
+
+
+def _get_cached_price(asset_id: str) -> tuple[float | None, str | None]:
+    """Get price from cache if valid (not expired).
+
+    Returns:
+        Tuple of (price, source) or (None, None) if not cached or expired
+    """
+    if asset_id in _PRICE_CACHE:
+        cached = _PRICE_CACHE[asset_id]
+        if _is_cache_valid(cached.get("timestamp")):
+            return cached["price"], cached["source"]
+    return None, None
+
+
+def _get_cached_price_any_age(asset_id: str) -> tuple[float | None, str | None]:
+    """Get price from cache regardless of age (for fallback).
+
+    Returns:
+        Tuple of (price, source) or (None, None) if not cached
+    """
+    if asset_id in _PRICE_CACHE:
+        cached = _PRICE_CACHE[asset_id]
+        return cached.get("price"), cached.get("source")
+    return None, None
+
+
+def _set_cached_price(asset_id: str, price: float, source: str):
+    """Cache a price with timestamp."""
+    _PRICE_CACHE[asset_id] = {
+        "price": price,
+        "source": source,
+        "timestamp": datetime.now().isoformat()
+    }
+    # Save to disk periodically (on every cache update for simplicity)
+    _save_disk_cache()
+
+
+# Load disk cache on module import
+_disk_cache = _load_disk_cache()
+if _disk_cache:
+    _PRICE_CACHE = _disk_cache.get("prices", {})
+    _EXCHANGE_RATE_CACHE = _disk_cache.get("exchange_rates", {})
+    print(f"Loaded {len(_PRICE_CACHE)} cached prices from disk")
 
 
 def get_usd_eur_rate() -> float:
-    """Get current USD to EUR exchange rate.
+    """Get current USD to EUR exchange rate with TTL caching.
 
     Returns:
         Exchange rate (e.g., 0.92 means 1 USD = 0.92 EUR)
     """
+    # Check TTL-based cache first
     if "USD_EUR" in _EXCHANGE_RATE_CACHE:
-        return _EXCHANGE_RATE_CACHE["USD_EUR"]
+        cached = _EXCHANGE_RATE_CACHE["USD_EUR"]
+        if isinstance(cached, dict) and _is_cache_valid(cached.get("timestamp"), ttl_minutes=60):
+            return cached["rate"]
+        elif isinstance(cached, (int, float)):
+            # Old format - treat as valid for backwards compatibility
+            return cached
 
     try:
         # Try Polygon forex rate
         rate_data = polygon_client.get_previous_close_agg("C:USDEUR")
         if rate_data and len(rate_data) > 0 and rate_data[0].close:
             rate = rate_data[0].close
-            _EXCHANGE_RATE_CACHE["USD_EUR"] = rate
+            _EXCHANGE_RATE_CACHE["USD_EUR"] = {
+                "rate": rate,
+                "timestamp": datetime.now().isoformat()
+            }
+            _save_disk_cache()
             print(f"USD/EUR rate from Polygon: {rate:.4f}")
             return rate
     except Exception as e:
         print(f"Polygon forex error: {e}")
 
+    # Try to use expired cached rate before falling back to hardcoded
+    if "USD_EUR" in _EXCHANGE_RATE_CACHE:
+        cached = _EXCHANGE_RATE_CACHE["USD_EUR"]
+        if isinstance(cached, dict) and cached.get("rate"):
+            print(f"Using expired cached USD/EUR rate: {cached['rate']:.4f}")
+            return cached["rate"]
+
     # Fallback to approximate rate
     fallback_rate = 0.92  # Approximate USD to EUR rate
-    _EXCHANGE_RATE_CACHE["USD_EUR"] = fallback_rate
+    _EXCHANGE_RATE_CACHE["USD_EUR"] = {
+        "rate": fallback_rate,
+        "timestamp": datetime.now().isoformat()
+    }
     print(f"Using fallback USD/EUR rate: {fallback_rate}")
     return fallback_rate
 
@@ -120,8 +231,6 @@ def fetch_polygon_price(ticker: str) -> float | None:
     Returns:
         Price from Polygon or None if unavailable
     """
-    from datetime import datetime, timedelta
-
     try:
         # Try get_previous_close_agg first (works on free tier for stocks)
         try:
@@ -319,12 +428,13 @@ def _is_eur_ticker(ticker: str) -> bool:
 def get_price(asset_id: str) -> float:
     """Get current price for an asset in the asset's currency (usually EUR).
 
-    Price resolution order:
-    1. Check session cache first
-    2. If asset has 'polygon.ticker' -> fetch from Polygon API
-    3. If Polygon fails -> try Brave Search (Google Finance, Yahoo Finance, etc.)
-    4. If asset has 'unit_current_price' -> use manual value
-    5. Fallback to 'unit_purchase_price'
+    Price resolution order (with TTL-based caching):
+    1. Check TTL cache - return if valid (not expired)
+    2. If expired/missing and has 'polygon.ticker' -> fetch from Polygon API
+    3. If Polygon fails -> use expired cache (last known good price)
+    4. If no cached price -> try Brave Search
+    5. If Brave fails -> use 'unit_current_price' (manual fallback)
+    6. Final fallback -> 'unit_purchase_price'
 
     Currency conversion: USD prices from Polygon/Brave are converted to EUR
     if the asset's currency is EUR.
@@ -335,9 +445,10 @@ def get_price(asset_id: str) -> float:
     Returns:
         Current price in asset's currency (EUR)
     """
-    # Check session cache first
-    if asset_id in _PRICE_CACHE:
-        return _PRICE_CACHE[asset_id]
+    # 1. Check TTL-based cache first
+    cached_price, cached_source = _get_cached_price(asset_id)
+    if cached_price is not None:
+        return cached_price
 
     asset = get_asset_by_id(asset_id)
     if not asset:
@@ -346,9 +457,9 @@ def get_price(asset_id: str) -> float:
 
     asset_currency = asset.get("currency", "EUR")
     price = None
-    needs_usd_to_eur = False
+    source = None
 
-    # Try Polygon API if ticker is defined
+    # 2. Try Polygon API if ticker is defined
     if "polygon" in asset:
         ticker = asset["polygon"]["ticker"]
         price = fetch_polygon_price(ticker)
@@ -357,17 +468,23 @@ def get_price(asset_id: str) -> float:
             # Check if conversion needed (USD ticker but EUR asset)
             if asset_currency == "EUR" and not _is_eur_ticker(ticker):
                 price = convert_to_eur(price)
-            _PRICE_CACHE[asset_id] = price
+            _set_cached_price(asset_id, price, "Polygon API")
             return price
 
-        # Polygon failed - try Brave Search as fallback
+        # 3. Polygon failed - try expired cache (last known good price)
+        expired_price, expired_source = _get_cached_price_any_age(asset_id)
+        if expired_price is not None:
+            print(f"Using cached price for {asset['name']} (source: {expired_source})")
+            return expired_price
+
+        # 4. No cached price - try Brave Search as fallback
         print(f"Warning: No Polygon data for {asset['name']}, trying Brave Search...")
         price, source = fetch_price_from_brave_search(asset["name"], ticker)
         if price is not None:
             # Brave Search returns USD prices - convert if needed
             if asset_currency == "EUR":
                 price = convert_to_eur(price)
-            _PRICE_CACHE[asset_id] = price
+            _set_cached_price(asset_id, price, source)
             return price
 
         print(f"Warning: Brave Search also failed for {asset['name']}, using manual fallback")
@@ -375,32 +492,37 @@ def get_price(asset_id: str) -> float:
     # For assets without Polygon ticker - only try Brave Search for tradeable types
     # Cash, bonds, real_estate should use manual values (Brave Search gives garbage)
     elif asset["type"] in ["stock", "crypto"]:
+        # Check expired cache first
+        expired_price, expired_source = _get_cached_price_any_age(asset_id)
+        if expired_price is not None:
+            print(f"Using cached price for {asset['name']} (source: {expired_source})")
+            return expired_price
+
         print(f"No Polygon ticker for {asset['name']}, trying Brave Search...")
         price, source = fetch_price_from_brave_search(asset["name"])
         if price is not None:
             # Brave Search returns USD prices - convert if needed
             if asset_currency == "EUR":
                 price = convert_to_eur(price)
-            _PRICE_CACHE[asset_id] = price
+            _set_cached_price(asset_id, price, source)
             return price
 
-    # Use manual unit_current_price if defined (already in asset's currency)
+    # 5. Use manual unit_current_price if defined (already in asset's currency)
     if "unit_current_price" in asset:
         price = asset["unit_current_price"]
-        _PRICE_CACHE[asset_id] = price
+        _set_cached_price(asset_id, price, "manual (unit_current_price)")
         return price
 
-    # Fallback to purchase price (already in asset's currency)
+    # 6. Final fallback to purchase price (already in asset's currency)
     price = asset["unit_purchase_price"]
-    _PRICE_CACHE[asset_id] = price
+    _set_cached_price(asset_id, price, "fallback (unit_purchase_price)")
     return price
 
 
 def get_price_with_source(asset_id: str) -> tuple[float, str]:
     """Get current price for an asset with source information.
 
-    Currency conversion: USD prices from Polygon/Brave are converted to EUR
-    if the asset's currency is EUR.
+    Uses TTL-based caching with improved fallback chain.
 
     Args:
         asset_id: Asset identifier
@@ -408,9 +530,10 @@ def get_price_with_source(asset_id: str) -> tuple[float, str]:
     Returns:
         Tuple of (price_in_eur, source) where source indicates where the price came from
     """
-    # Check session cache first
-    if asset_id in _PRICE_SOURCE_CACHE:
-        return _PRICE_SOURCE_CACHE[asset_id]
+    # 1. Check TTL-based cache first
+    cached_price, cached_source = _get_cached_price(asset_id)
+    if cached_price is not None:
+        return cached_price, cached_source
 
     asset = get_asset_by_id(asset_id)
     if not asset:
@@ -420,7 +543,7 @@ def get_price_with_source(asset_id: str) -> tuple[float, str]:
     asset_currency = asset.get("currency", "EUR")
     result = None
 
-    # Try Polygon API if ticker is defined
+    # 2. Try Polygon API if ticker is defined
     if "polygon" in asset:
         ticker = asset["polygon"]["ticker"]
         price = fetch_polygon_price(ticker)
@@ -428,40 +551,55 @@ def get_price_with_source(asset_id: str) -> tuple[float, str]:
             # Convert USD to EUR if needed
             if asset_currency == "EUR" and not _is_eur_ticker(ticker):
                 price = convert_to_eur(price)
+            _set_cached_price(asset_id, price, "Polygon API")
             result = (price, "Polygon API")
         else:
-            # Polygon failed - try Brave Search as fallback
-            print(f"Warning: No Polygon data for {asset['name']}, trying Brave Search...")
-            price, source = fetch_price_from_brave_search(asset["name"], ticker)
-            if price is not None:
-                # Brave Search returns USD - convert if needed
-                if asset_currency == "EUR":
-                    price = convert_to_eur(price)
-                result = (price, source)
+            # 3. Polygon failed - try expired cache
+            expired_price, expired_source = _get_cached_price_any_age(asset_id)
+            if expired_price is not None:
+                print(f"Using cached price for {asset['name']} (source: {expired_source})")
+                result = (expired_price, expired_source)
             else:
-                print(f"Warning: Brave Search also failed for {asset['name']}, using manual fallback")
+                # 4. No cached price - try Brave Search
+                print(f"Warning: No Polygon data for {asset['name']}, trying Brave Search...")
+                price, source = fetch_price_from_brave_search(asset["name"], ticker)
+                if price is not None:
+                    if asset_currency == "EUR":
+                        price = convert_to_eur(price)
+                    _set_cached_price(asset_id, price, source)
+                    result = (price, source)
+                else:
+                    print(f"Warning: Brave Search also failed for {asset['name']}, using manual fallback")
 
     # For assets without Polygon ticker - only try Brave Search for tradeable types
-    # Cash, bonds, real_estate should use manual values (Brave Search gives garbage)
     elif asset["type"] in ["stock", "crypto"]:
-        print(f"No Polygon ticker for {asset['name']}, trying Brave Search...")
-        price, source = fetch_price_from_brave_search(asset["name"])
-        if price is not None:
-            # Brave Search returns USD - convert if needed
-            if asset_currency == "EUR":
-                price = convert_to_eur(price)
-            result = (price, source)
+        # Check expired cache first
+        expired_price, expired_source = _get_cached_price_any_age(asset_id)
+        if expired_price is not None:
+            print(f"Using cached price for {asset['name']} (source: {expired_source})")
+            result = (expired_price, expired_source)
+        else:
+            print(f"No Polygon ticker for {asset['name']}, trying Brave Search...")
+            price, source = fetch_price_from_brave_search(asset["name"])
+            if price is not None:
+                if asset_currency == "EUR":
+                    price = convert_to_eur(price)
+                _set_cached_price(asset_id, price, source)
+                result = (price, source)
 
-    # If no API price found, use manual values (already in asset's currency)
+    # 5. If no API price found, use manual values
     if result is None:
         if "unit_current_price" in asset:
-            result = (asset["unit_current_price"], "manual")
+            price = asset["unit_current_price"]
+            _set_cached_price(asset_id, price, "manual (unit_current_price)")
+            result = (price, "manual")
         else:
             result = (asset["unit_purchase_price"], "purchase_price")
 
-    # Cache and return
-    _PRICE_SOURCE_CACHE[asset_id] = result
-    _PRICE_CACHE[asset_id] = result[0]
+    # Final fallback - cache and return
+    if result[1] == "purchase_price":
+        _set_cached_price(asset_id, result[0], "fallback (unit_purchase_price)")
+
     return result
 
 
@@ -495,20 +633,41 @@ def calculate_allocation(holdings: dict) -> tuple[dict, float]:
     return allocation, total_value
 
 
-def clear_price_cache():
-    """Clear all price caches to force fresh API calls.
+def clear_price_cache(force: bool = False):
+    """Clear price caches.
 
-    Call this once at session start, not repeatedly during a run.
+    With TTL-based caching, this is usually not needed. The cache will
+    automatically refresh when entries expire.
+
+    Args:
+        force: If True, clear all caches including disk cache.
+               If False (default), only clear the lru_cache for Polygon API.
     """
-    global _PRICE_CACHE, _PRICE_SOURCE_CACHE, _EXCHANGE_RATE_CACHE
-    _PRICE_CACHE = {}
-    _PRICE_SOURCE_CACHE = {}
-    _EXCHANGE_RATE_CACHE = {}
-    fetch_polygon_price.cache_clear()
+    global _PRICE_CACHE, _EXCHANGE_RATE_CACHE
+
+    if force:
+        # Full cache clear - use sparingly
+        _PRICE_CACHE = {}
+        _EXCHANGE_RATE_CACHE = {}
+        fetch_polygon_price.cache_clear()
+        # Also delete disk cache file
+        if os.path.exists(PRICE_CACHE_FILE):
+            try:
+                os.remove(PRICE_CACHE_FILE)
+                print("Cleared disk price cache")
+            except IOError:
+                pass
+        print("Price cache fully cleared")
+    else:
+        # Soft clear - only clear the lru_cache to allow fresh Polygon calls
+        # TTL cache is preserved to avoid rate limiting
+        fetch_polygon_price.cache_clear()
 
 
-def get_initial_holdings() -> dict:
-    """Get initial holdings from portfolio definition.
+def get_pre_rebalancing_holdings() -> dict:
+    """Get pre-rebalancing holdings from portfolio definition.
+
+    These are the holdings BEFORE any trades are executed.
 
     Returns:
         Dict of {asset_id: {"type": str, "quantity": float, "avg_price": float, ...}}
@@ -525,11 +684,13 @@ def get_initial_holdings() -> dict:
     }
 
 
-def calculate_initial_value() -> float:
-    """Calculate initial portfolio value from purchase prices.
+def calculate_original_investment() -> float:
+    """Calculate original investment value from purchase prices.
+
+    This is the total amount originally invested (cost basis).
 
     Returns:
-        Total initial value based on unit_purchase_price * quantity
+        Total original investment based on unit_purchase_price * quantity
     """
     total = 0.0
     for asset in PORTFOLIO["assets"]:

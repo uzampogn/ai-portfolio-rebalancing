@@ -3,7 +3,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from portfolio_server.portfolio import get_price, PORTFOLIO, clear_price_cache, calculate_allocation, get_initial_holdings
+from portfolio_server.portfolio import get_price, PORTFOLIO, clear_price_cache, calculate_allocation, get_pre_rebalancing_holdings
 
 print("Testing Polygon API integration...")
 print("=" * 60)
@@ -28,7 +28,7 @@ print(f"{'Total Portfolio Value':25} ${total_value:>12,.2f}")
 print("=" * 60)
 
 # Show allocation
-holdings = get_initial_holdings()
+holdings = get_pre_rebalancing_holdings()
 allocation, _ = calculate_allocation(holdings)
 print("\nCurrent Allocation:")
 for asset_type, pct in allocation.items():

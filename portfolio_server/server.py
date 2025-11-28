@@ -4,12 +4,11 @@ from mcp.server.fastmcp import FastMCP
 from portfolio_server import portfolio as portfolio_data
 from portfolio_server.portfolio import (
     calculate_allocation,
-    calculate_initial_value,
+    calculate_original_investment,
     get_price,
     get_price_with_source,
     get_asset_by_id,
-    clear_price_cache,
-    get_initial_holdings,
+    get_pre_rebalancing_holdings,
     reload_portfolio
 )
 import json
@@ -28,8 +27,10 @@ ANALYSIS = {
     "portfolio_analysis": None,
     "target_allocation": None
 }
-# Session-level analysis snapshot (computed once, reused for consistency)
-_ANALYSIS_SNAPSHOT = None
+# Pre-rebalancing snapshot (portfolio state BEFORE any trades)
+_PRE_REBALANCING_SNAPSHOT = None
+# Post-rebalancing snapshot (portfolio state AFTER trades executed)
+_POST_REBALANCING_SNAPSHOT = None
 
 
 def save_state():
@@ -55,18 +56,19 @@ def load_state():
 
 
 def reset_portfolio():
-    """Reset to initial state.
+    """Reset to pre-rebalancing state.
 
     This reloads portfolio.json to ensure latest data is used.
     Note: Does NOT clear price cache to avoid rate limiting issues with Polygon API.
     """
-    global CURRENT_HOLDINGS, TRADES, ANALYSIS, _ANALYSIS_SNAPSHOT
+    global CURRENT_HOLDINGS, TRADES, ANALYSIS, _PRE_REBALANCING_SNAPSHOT, _POST_REBALANCING_SNAPSHOT
     # Reload portfolio from JSON file to get latest changes
     reload_portfolio()
-    CURRENT_HOLDINGS = get_initial_holdings()
+    CURRENT_HOLDINGS = get_pre_rebalancing_holdings()
     TRADES = []
     ANALYSIS = {"portfolio_analysis": None, "target_allocation": None}
-    _ANALYSIS_SNAPSHOT = None  # Clear snapshot so it's recomputed fresh
+    _PRE_REBALANCING_SNAPSHOT = None  # Clear so it's recomputed fresh
+    _POST_REBALANCING_SNAPSHOT = None  # Clear so it's recomputed fresh
     # Don't clear price cache here - causes rate limiting issues
     save_state()
 
@@ -78,7 +80,7 @@ def init_portfolio():
         try:
             load_state()
             if CURRENT_HOLDINGS:
-                clear_price_cache()
+                # TTL-based cache handles freshness - no need to clear
                 return
         except Exception:
             pass
@@ -97,10 +99,9 @@ async def get_portfolio_state() -> dict:
         Note: Target allocation is not included - the Financial Analyst agent
         should recommend one based on the investor profile and market conditions.
     """
-    clear_price_cache()
-
+    # TTL-based cache handles freshness automatically
     allocation, total_value = calculate_allocation(CURRENT_HOLDINGS)
-    initial_value = calculate_initial_value()
+    original_investment = calculate_original_investment()
 
     # Build holdings with current prices
     holdings_with_prices = {}
@@ -116,7 +117,7 @@ async def get_portfolio_state() -> dict:
 
     return {
         "name": portfolio_data.PORTFOLIO["name"],
-        "initial_value": initial_value,
+        "original_investment": original_investment,
         "current_value": total_value,
         "holdings": holdings_with_prices,
         "current_allocation": allocation,
@@ -134,8 +135,7 @@ async def get_asset_price(asset_id: str) -> dict:
     Returns:
         Price info including source (Polygon API, Google Finance, Yahoo Finance, etc.)
     """
-    clear_price_cache()
-
+    # TTL-based cache handles freshness automatically
     asset = get_asset_by_id(asset_id)
     if not asset:
         return {"error": f"Asset '{asset_id}' not found"}
@@ -174,8 +174,7 @@ async def simulate_trade(
     if not asset:
         return {"error": f"Asset '{asset_id}' not found in portfolio definition"}
 
-    clear_price_cache()
-
+    # TTL-based cache handles freshness automatically
     # Get price with source to determine if tradeable
     price, source = get_price_with_source(asset_id)
 
@@ -288,20 +287,19 @@ async def calculate_performance() -> dict:
     """Calculate portfolio performance metrics.
 
     Returns:
-        Performance summary with initial vs current values
+        Performance summary with original investment vs current values
     """
-    clear_price_cache()
-
+    # TTL-based cache handles freshness automatically
     _, current_value = calculate_allocation(CURRENT_HOLDINGS)
 
-    initial = calculate_initial_value()
-    change = current_value - initial
-    change_pct = (change / initial) * 100 if initial > 0 else 0
+    original_investment = calculate_original_investment()
+    change = current_value - original_investment
+    change_pct = (change / original_investment) * 100 if original_investment > 0 else 0
 
     total_fees = sum(t.get("fees", 0) for t in TRADES)
 
     return {
-        "initial_value": initial,
+        "original_investment": original_investment,
         "current_value": current_value,
         "absolute_change": change,
         "percentage_change": change_pct,
@@ -318,7 +316,7 @@ async def list_tradeable_assets() -> list:
     Returns:
         List of tradeable assets with their IDs, current prices, and price sources
     """
-    clear_price_cache()
+    # TTL-based cache handles freshness automatically
     tradeable_sources = ["Polygon API", "Google Finance", "Yahoo Finance", "MarketWatch", "Brave Search"]
     tradeable = []
 
@@ -338,24 +336,18 @@ async def list_tradeable_assets() -> list:
 
 @mcp.tool()
 async def generate_portfolio_analysis() -> dict:
-    """Generate portfolio analysis with exact computed values.
+    """Generate portfolio analysis with exact computed values from PRE-REBALANCING state.
 
-    Returns structured analysis with pre-computed numbers that should be used
-    directly without recalculation. The LLM should add qualitative commentary
+    Returns structured analysis with pre-computed numbers based on the portfolio
+    BEFORE any trades are executed. The LLM should add qualitative commentary
     to these exact values.
 
-    This also initializes the session snapshot used by save_analysis() to ensure
-    all analysis sections show consistent values.
-
     Returns:
-        Dictionary with exact computed metrics for portfolio analysis
+        Dictionary with exact computed metrics for pre-rebalancing portfolio analysis
     """
-    # Clear and recompute snapshot to ensure fresh, consistent values
-    clear_analysis_snapshot()
-    clear_price_cache()
-
-    # Get or create the snapshot (this will compute fresh values)
-    snapshot = get_analysis_snapshot()
+    # TTL-based cache handles freshness automatically
+    # Use PRE-REBALANCING snapshot (portfolio state before any trades)
+    snapshot = get_pre_rebalancing_snapshot()
 
     # Ensure all standard classes are present in allocation
     allocation = snapshot["allocation"].copy()
@@ -366,10 +358,8 @@ async def generate_portfolio_analysis() -> dict:
     return {
         "total_value": snapshot["total_value"],
         "total_value_formatted": snapshot["total_value_formatted"],
-        "initial_value": snapshot["initial_value"],
-        "initial_value_formatted": f"€{snapshot['initial_value']:,.2f}",
-        "cost_basis": snapshot["cost_basis"],
-        "cost_basis_formatted": f"€{snapshot['cost_basis']:,.2f}",
+        "original_investment": snapshot["original_investment"],
+        "original_investment_formatted": f"€{snapshot['original_investment']:,.2f}",
         "performance": {
             "absolute_change": snapshot["performance_absolute"],
             "percentage_change": snapshot["performance_percentage"],
@@ -379,32 +369,70 @@ async def generate_portfolio_analysis() -> dict:
         "allocation_formatted": ", ".join(
             f"{cls}: {pct}%" for cls, pct in sorted(allocation.items(), key=lambda x: -x[1]) if pct > 0
         ),
-        "holdings_count": len(CURRENT_HOLDINGS),
+        "holdings_count": len(get_pre_rebalancing_holdings()),
         "instruction": "USE THESE EXACT VALUES in your analysis. Do NOT recalculate or approximate."
     }
 
 
-def get_analysis_snapshot() -> dict:
-    """Get or create a consistent analysis snapshot for the current session.
+def get_pre_rebalancing_snapshot() -> dict:
+    """Get or create snapshot of the PRE-REBALANCING portfolio state (before any trades).
 
-    This ensures all analysis uses the same price data, avoiding inconsistencies
-    when prices change between API calls.
+    This captures the portfolio value and allocation at the start of the session,
+    which should be used for the portfolio analysis section.
     """
-    global _ANALYSIS_SNAPSHOT
+    global _PRE_REBALANCING_SNAPSHOT
 
-    if _ANALYSIS_SNAPSHOT is None:
-        # Compute fresh snapshot (prices already in cache from generate_portfolio_analysis)
+    if _PRE_REBALANCING_SNAPSHOT is None:
+        # Get pre-rebalancing holdings (from portfolio.json)
+        pre_rebalancing_holdings = get_pre_rebalancing_holdings()
+
+        # Compute values based on pre-rebalancing holdings with current prices
+        allocation, total_value = calculate_allocation(pre_rebalancing_holdings)
+        original_investment = calculate_original_investment()
+
+        change_from_original = total_value - original_investment
+        change_pct_original = (change_from_original / original_investment) * 100 if original_investment > 0 else 0
+
+        # Calculate allocation by asset class
+        class_allocation = {}
+        for asset_id, data in pre_rebalancing_holdings.items():
+            asset_type = data.get("type", "other")
+            current_price = get_price(asset_id)
+            asset_value = data["quantity"] * current_price
+            class_allocation[asset_type] = class_allocation.get(asset_type, 0) + asset_value
+
+        class_percentages = {}
+        for asset_type, value in class_allocation.items():
+            class_percentages[asset_type] = round((value / total_value) * 100, 1) if total_value > 0 else 0
+
+        _PRE_REBALANCING_SNAPSHOT = {
+            "total_value": round(total_value, 2),
+            "total_value_formatted": f"€{total_value:,.2f}",
+            "original_investment": round(original_investment, 2),
+            "performance_absolute": round(change_from_original, 2),
+            "performance_percentage": round(change_pct_original, 2),
+            "performance_formatted": f"{'+' if change_from_original >= 0 else ''}€{change_from_original:,.2f} ({change_pct_original:+.2f}%)",
+            "allocation": class_percentages
+        }
+
+    return _PRE_REBALANCING_SNAPSHOT
+
+
+def get_post_rebalancing_snapshot() -> dict:
+    """Get or create snapshot of the POST-REBALANCING portfolio state (after trades).
+
+    This uses CURRENT_HOLDINGS which reflects the portfolio after trades have been executed.
+    Used for target allocation section to show the final state.
+    """
+    global _POST_REBALANCING_SNAPSHOT
+
+    if _POST_REBALANCING_SNAPSHOT is None:
+        # Compute fresh snapshot based on current (post-trade) holdings
         allocation, total_value = calculate_allocation(CURRENT_HOLDINGS)
-        initial_value = calculate_initial_value()
+        original_investment = calculate_original_investment()
 
-        # Also compute cost basis of current holdings for comparison
-        cost_basis = sum(
-            data["quantity"] * data["avg_price"]
-            for data in CURRENT_HOLDINGS.values()
-        )
-
-        change_from_original = total_value - initial_value
-        change_pct_original = (change_from_original / initial_value) * 100 if initial_value > 0 else 0
+        change_from_original = total_value - original_investment
+        change_pct_original = (change_from_original / original_investment) * 100 if original_investment > 0 else 0
 
         # Calculate allocation by asset class
         class_allocation = {}
@@ -418,24 +446,23 @@ def get_analysis_snapshot() -> dict:
         for asset_type, value in class_allocation.items():
             class_percentages[asset_type] = round((value / total_value) * 100, 1) if total_value > 0 else 0
 
-        _ANALYSIS_SNAPSHOT = {
+        _POST_REBALANCING_SNAPSHOT = {
             "total_value": round(total_value, 2),
             "total_value_formatted": f"€{total_value:,.2f}",
-            "initial_value": round(initial_value, 2),
-            "cost_basis": round(cost_basis, 2),
+            "original_investment": round(original_investment, 2),
             "performance_absolute": round(change_from_original, 2),
             "performance_percentage": round(change_pct_original, 2),
             "performance_formatted": f"{'+' if change_from_original >= 0 else ''}€{change_from_original:,.2f} ({change_pct_original:+.2f}%)",
             "allocation": class_percentages
         }
 
-    return _ANALYSIS_SNAPSHOT
+    return _POST_REBALANCING_SNAPSHOT
 
 
-def clear_analysis_snapshot():
-    """Clear the analysis snapshot to force recomputation."""
-    global _ANALYSIS_SNAPSHOT
-    _ANALYSIS_SNAPSHOT = None
+def clear_post_rebalancing_snapshot():
+    """Clear the post-rebalancing snapshot to force recomputation."""
+    global _POST_REBALANCING_SNAPSHOT
+    _POST_REBALANCING_SNAPSHOT = None
 
 
 @mcp.tool()
@@ -445,8 +472,9 @@ async def save_analysis(
 ) -> dict:
     """Save analysis with consistent computed metrics plus LLM commentary.
 
-    Uses a session-level price snapshot to ensure all analysis shows consistent
-    values (same total_value, allocation, performance across all sections).
+    Uses appropriate snapshot based on analysis type:
+    - portfolio_analysis: Uses PRE-REBALANCING snapshot (before trades)
+    - target_allocation: Uses POST-REBALANCING snapshot (after trades)
 
     Args:
         analysis_type: Either "portfolio_analysis" or "target_allocation"
@@ -459,8 +487,13 @@ async def save_analysis(
     if analysis_type not in ["portfolio_analysis", "target_allocation"]:
         return {"error": f"Invalid analysis_type: {analysis_type}. Use 'portfolio_analysis' or 'target_allocation'"}
 
-    # Use consistent snapshot (computed once per session)
-    snapshot = get_analysis_snapshot()
+    # Use appropriate snapshot based on analysis type
+    if analysis_type == "portfolio_analysis":
+        # Portfolio analysis should reflect PRE-REBALANCING state (before trades)
+        snapshot = get_pre_rebalancing_snapshot()
+    else:
+        # Target allocation reflects POST-REBALANCING state (after trades)
+        snapshot = get_post_rebalancing_snapshot()
 
     # Store structured data with consistent values
     ANALYSIS[analysis_type] = {

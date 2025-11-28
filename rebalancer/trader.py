@@ -16,8 +16,14 @@ STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".portfoli
 
 brave_env = {"BRAVE_API_KEY": os.getenv("BRAVE_SEARCH_API_KEY")}
 
+# Environment variables to pass to MCP subprocesses
+portfolio_env = {
+    "POLYGON_API_KEY": os.getenv("POLYGON_API_KEY", ""),
+    "BRAVE_SEARCH_API_KEY": os.getenv("BRAVE_SEARCH_API_KEY", ""),
+}
+
 # MCP server configurations - run from project root
-portfolio_mcp_params = {"command": "python", "args": ["-m", "portfolio_server.server"]}
+portfolio_mcp_params = {"command": "python", "args": ["-m", "portfolio_server.server"], "env": portfolio_env}
 search_mcp_params = {
     "command": "npx",
     "args": ["-y", "@modelcontextprotocol/server-brave-search"],

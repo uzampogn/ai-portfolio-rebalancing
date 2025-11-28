@@ -4,7 +4,7 @@ import gradio as gr
 import plotly.graph_objects as go
 import pandas as pd
 from portfolio_server import portfolio as portfolio_data
-from portfolio_server.portfolio import calculate_allocation, clear_price_cache, get_initial_holdings, reload_portfolio
+from portfolio_server.portfolio import calculate_allocation, get_pre_rebalancing_holdings, reload_portfolio
 import asyncio
 import os
 from rebalancer.trader import run_rebalancing
@@ -19,14 +19,17 @@ if os.path.exists(STATE_FILE):
     os.remove(STATE_FILE)
     print("Cleared stale state file on app startup")
 
-def get_initial_data():
-    """Get initial portfolio data with real-time prices.
+def get_pre_rebalancing_data():
+    """Get pre-rebalancing portfolio data with real-time prices.
 
+    This represents the portfolio state BEFORE any trades are executed.
     Reloads portfolio.json to ensure latest data is used.
+
+    Note: Uses TTL-based price cache - prices refresh automatically when expired.
     """
     reload_portfolio()  # Reload from JSON file to get latest changes
-    clear_price_cache()
-    holdings = get_initial_holdings()
+    # TTL-based cache handles freshness - no need to force clear
+    holdings = get_pre_rebalancing_holdings()
     allocation, total_value = calculate_allocation(holdings)
 
     return {
@@ -108,41 +111,39 @@ def format_portfolio_summary(data):
 
 def run_rebalancing_sync():
     """Synchronous wrapper for async rebalancing."""
-    # Reload portfolio.json to get latest changes
-    reload_portfolio()
+    # 1. Capture PRE-REBALANCING state FIRST (before any trades)
+    # TTL-based cache handles freshness automatically
+    pre_rebalancing_data = get_pre_rebalancing_data()
+    pre_rebalancing_allocation = pre_rebalancing_data["allocation"]
 
-    # Reset portfolio to initial state (also reloads portfolio.json)
+    # 2. Reset portfolio and run agent (trades happen here)
     portfolio_mcp.reset_portfolio()
 
-    # Run 3-agent system
     print("\n" + "="*70)
     print("STARTING 3-AGENT REBALANCING SYSTEM")
     print("="*70)
     asyncio.run(run_rebalancing())
 
-    # Load state from shared file (updated by MCP subprocess)
+    # 3. Load POST-REBALANCING state from shared file (updated by MCP subprocess)
     portfolio_mcp.load_state()
 
     # Get results
     trades = portfolio_mcp.TRADES
     analysis = portfolio_mcp.ANALYSIS
 
-    # Calculate final allocation
-    clear_price_cache()
-    holdings = portfolio_mcp.CURRENT_HOLDINGS
+    # 4. Calculate POST-REBALANCING allocation
+    # TTL-based cache handles freshness - no need to clear
+    post_rebalancing_holdings = portfolio_mcp.CURRENT_HOLDINGS
+    post_rebalancing_allocation, _ = calculate_allocation(post_rebalancing_holdings)
 
-    final_allocation, _ = calculate_allocation(holdings)
-
-    # Create outputs
-    initial_data = get_initial_data()
-
-    initial_chart = create_allocation_pie_chart(
-        initial_data["allocation"],
-        "Initial Allocation"
+    # 5. Create charts with clear naming
+    before_chart = create_allocation_pie_chart(
+        pre_rebalancing_allocation,
+        "Before Rebalancing"
     )
 
-    final_chart = create_allocation_pie_chart(
-        final_allocation,
+    after_chart = create_allocation_pie_chart(
+        post_rebalancing_allocation,
         "After Rebalancing"
     )
 
@@ -183,23 +184,18 @@ def run_rebalancing_sync():
     # Format analysis for display (handles both old string format and new structured format)
     portfolio_analysis_data = analysis.get("portfolio_analysis")
     if isinstance(portfolio_analysis_data, dict):
-        # New structured format with computed values
+        # New structured format with computed values (PRE-REBALANCING)
         computed = portfolio_analysis_data.get("computed", {})
         commentary = portfolio_analysis_data.get("commentary", "")
         allocation = computed.get("allocation", {})
         allocation_str = ", ".join(f"{k}: {v}%" for k, v in sorted(allocation.items(), key=lambda x: -x[1]) if v > 0)
 
-        # Show cost basis if different from initial (indicates trades occurred)
-        initial_val = computed.get('initial_value', 0)
-        cost_basis = computed.get('cost_basis', initial_val)
-        cost_line = ""
-        if cost_basis != initial_val:
-            cost_line = f"\n- **Cost Basis (after trades):** €{cost_basis:,.2f}"
+        original_investment = computed.get('original_investment', 0)
 
-        portfolio_analysis = f"""**PORTFOLIO ANALYSIS** (Computed Values)
+        portfolio_analysis = f"""**PRE-REBALANCING PORTFOLIO ANALYSIS**
 
 - **Current Value:** {computed.get('total_value_formatted', 'N/A')}
-- **Original Investment:** €{initial_val:,.2f}{cost_line}
+- **Original Investment:** €{original_investment:,.2f}
 - **Total Return:** {computed.get('performance_formatted', 'N/A')}
 - **Allocation:** {allocation_str}
 
@@ -210,25 +206,17 @@ def run_rebalancing_sync():
 
     target_allocation_data = analysis.get("target_allocation")
     if isinstance(target_allocation_data, dict):
-        # New structured format
-        computed = target_allocation_data.get("computed", {})
+        # Show only the recommendation/rationale
         commentary = target_allocation_data.get("commentary", "")
-        allocation = computed.get("allocation", {})
-        allocation_str = ", ".join(f"{k}: {v}%" for k, v in sorted(allocation.items(), key=lambda x: -x[1]) if v > 0)
         target_allocation_rationale = f"""**TARGET ALLOCATION RECOMMENDATION**
 
-- **Portfolio Value:** {computed.get('total_value_formatted', 'N/A')}
-- **Current Allocation:** {allocation_str}
-- **Performance:** {computed.get('performance_formatted', 'N/A')}
-
-**Rationale:**
 {commentary}"""
     else:
         target_allocation_rationale = target_allocation_data or "No rationale available"
 
     return (
-        initial_chart,
-        final_chart,
+        before_chart,
+        after_chart,
         trades_df,
         portfolio_analysis,
         target_allocation_rationale,
@@ -238,28 +226,9 @@ def run_rebalancing_sync():
 def create_ui():
     """Create the Gradio interface."""
 
-    initial_data = get_initial_data()
+    pre_rebalancing_data = get_pre_rebalancing_data()
 
-    custom_css = """
-    .analysis-box {
-        height: 350px;
-        overflow-y: auto;
-        padding: 16px;
-        background-color: #f9f9f9;
-        border: 1px solid #e0e0e0;
-        border-radius: 8px;
-        color: #333333;
-        font-family: 'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, sans-serif;
-        font-size: 14px;
-        line-height: 1.6;
-    }
-    .analysis-box * {
-        color: #333333 !important;
-        font-family: 'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, sans-serif !important;
-    }
-    """
-
-    with gr.Blocks(title="3-Agent Portfolio Rebalancer", theme=gr.themes.Soft(primary_hue="blue"), css=custom_css) as app:
+    with gr.Blocks() as app:
 
         gr.Markdown("# MVP - Portfolio Rebalancing Tool (3-Agent System)")
         gr.Markdown("**Researcher** -> **Financial Analyst** -> **Trader** working together")
@@ -267,7 +236,7 @@ def create_ui():
         # Portfolio info and system explanation side by side
         with gr.Row():
             with gr.Column():
-                summary_html = gr.HTML(format_portfolio_summary(initial_data))
+                gr.HTML(format_portfolio_summary(pre_rebalancing_data))
             with gr.Column():
                 gr.Markdown("""
                 ### How the 3-Agent System Works:
@@ -299,15 +268,15 @@ def create_ui():
         gr.Markdown("---")
         gr.Markdown("## Portfolio Comparison")
 
-        # Charts row - just before and after (target is determined by agent)
+        # Charts row - before and after rebalancing
         with gr.Row():
             with gr.Column():
-                initial_chart = gr.Plot(
-                    create_allocation_pie_chart(initial_data["allocation"], "Current Allocation"),
-                    label="Current Portfolio"
+                before_chart = gr.Plot(
+                    create_allocation_pie_chart(pre_rebalancing_data["allocation"], "Before Rebalancing"),
+                    label="Before Rebalancing"
                 )
             with gr.Column():
-                final_chart = gr.Plot(
+                after_chart = gr.Plot(
                     create_allocation_pie_chart({}, "After Rebalancing"),
                     label="After Rebalancing (run agent to see)"
                 )
@@ -319,14 +288,12 @@ def create_ui():
             with gr.Column():
                 gr.Markdown("**Portfolio Analysis**")
                 portfolio_analysis_text = gr.Markdown(
-                    value="*Run rebalancing to see analysis...*",
-                    elem_classes=["analysis-box"]
+                    value="*Run rebalancing to see analysis...*"
                 )
             with gr.Column():
                 gr.Markdown("**Target Allocation Recommendation**")
                 target_allocation_text = gr.Markdown(
-                    value="*Run rebalancing to see recommendation...*",
-                    elem_classes=["analysis-box"]
+                    value="*Run rebalancing to see recommendation...*"
                 )
 
         gr.Markdown("---")
@@ -344,8 +311,8 @@ def create_ui():
             fn=run_rebalancing_sync,
             inputs=[],
             outputs=[
-                initial_chart,
-                final_chart,
+                before_chart,
+                after_chart,
                 trades_table,
                 portfolio_analysis_text,
                 target_allocation_text,

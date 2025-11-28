@@ -1,1 +1,0 @@
-Let's start with Phase 1. Implement the setup and Polygon integration. Use TodoWrite to track tasks.
