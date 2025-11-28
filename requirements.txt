@@ -1,0 +1,7 @@
+gradio
+plotly
+pandas
+openai-agents
+polygon-api-client
+python-dotenv
+mcp[cli]

@@ -1,5 +1,5 @@
 ---
-title: Ai Portfolio Rebalancing
+title: ai_portfolio_rebalancing
 emoji: 👁
 colorFrom: purple
 colorTo: yellow
