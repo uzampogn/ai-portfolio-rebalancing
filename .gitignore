@@ -1,0 +1,139 @@
+# =============================================================================
+# SECURITY - Secrets & Credentials (NEVER COMMIT)
+# =============================================================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.jks
+*credentials*
+*secret*
+*token*
+*.keystore
+.htpasswd
+.netrc
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+
+# API keys and config files that might contain secrets
+config.local.*
+settings.local.*
+*.secret.*
+
+# =============================================================================
+# Application State (contains runtime data)
+# =============================================================================
+.portfolio_state.json
+
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.so
+.venv/
+venv/
+ENV/
+env/
+.eggs/
+*.egg-info/
+*.egg
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# =============================================================================
+# Node.js
+# =============================================================================
+node_modules/
+.pnp/
+.pnp.js
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# =============================================================================
+# Build outputs
+# =============================================================================
+dist/
+build/
+out/
+.next/
+.nuxt/
+.output/
+*.whl
+
+# =============================================================================
+# Logs
+# =============================================================================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# =============================================================================
+# IDE & Editors
+# =============================================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# =============================================================================
+# OS files
+# =============================================================================
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# =============================================================================
+# Database & Backups
+# =============================================================================
+*.db
+*.sqlite
+*.sqlite3
+*.sql
+*.bak
+*.backup
+*.dump
+
+# =============================================================================
+# Misc
+# =============================================================================
+*.cache
+.cache/
+.temp/
+.tmp/
+tmp/
+temp/
+
+# Shell history (might contain secrets)
+.bash_history
+.zsh_history
+.python_history

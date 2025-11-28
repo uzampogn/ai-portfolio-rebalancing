@@ -1,0 +1,86 @@
+{
+  "name": "Assets Portfolio",
+  "trading_fee": 0.002,
+  "investor_profile": {
+    "risk_level": "moderate",
+    "time_horizon": 20,
+    "constraints": [
+      "no_leverage",
+      "keep_some_cash"
+    ],
+    "philosophy": "Diversified portfolio with a focus on long-term growth. Mix passive investment through ETFs and stock picking. Diversify between US and European stocks to reduce forex risk (EUR/USD)."
+  },
+  "assets": [
+    {
+      "id": "amzn",
+      "name": "Amazon",
+      "type": "stock",
+      "quantity": 700,
+      "unit_purchase_price": 160.0,
+      "currency": "EUR",
+      "polygon": {
+        "ticker": "AMZN"
+      }
+    },
+    {
+      "id": "nvda",
+      "name": "NVIDIA",
+      "type": "stock",
+      "quantity": 45,
+      "unit_purchase_price": 442.0,
+      "currency": "EUR",
+      "polygon": {
+        "ticker": "NVDA"
+      }
+    },
+    {
+      "id": "msft",
+      "name": "Microsoft",
+      "type": "stock",
+      "quantity": 40,
+      "unit_purchase_price": 45.0,
+      "currency": "EUR",
+      "polygon": {
+        "ticker": "MSFT"
+      }
+    },
+    {
+      "id": "vuaa",
+      "name": "Vanguard S&P 500 ETF",
+      "type": "stock",
+      "quantity": 130,
+      "unit_purchase_price": 102.0,
+      "currency": "EUR",
+      "polygon": {
+        "ticker": "VOO"
+      }
+    },
+    {
+      "id": "btc",
+      "name": "Bitcoin",
+      "type": "crypto",
+      "quantity": 0.05,
+      "unit_purchase_price": 103000.0,
+      "currency": "EUR",
+      "polygon": {
+        "ticker": "X:BTCEUR"
+      }
+    },
+    {
+      "id": "govt_bonds",
+      "name": "US Government Bonds 6.25% 2030",
+      "type": "bond",
+      "quantity": 100,
+      "unit_purchase_price": 98.0,
+      "currency": "EUR"
+    },
+    {
+      "id": "savings_account",
+      "name": "Savings Account 2.0%",
+      "type": "cash",
+      "quantity": 1,
+      "unit_purchase_price": 60000.0,
+      "currency": "EUR"
+    }
+  ]
+}
